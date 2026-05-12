@@ -770,9 +770,25 @@ export async function publishPost(queueId: string): Promise<boolean> {
       const finalObj: any = { ...schema }
       
       // Inject standard fallbacks if missing
-      if (!finalObj.name) finalObj.name = post.title
+      if (!finalObj.name) {
+        if (typeId === 'person') {
+          finalObj.name = post.authorName || 'Admin'
+        } else if (typeId === 'organization' || typeId === 'website') {
+          finalObj.name = siteData?.name || 'Website'
+        } else {
+          finalObj.name = post.title
+        }
+      }
       if (!finalObj.headline) finalObj.headline = post.title
-      if (!finalObj.description) finalObj.description = post.excerpt || ''
+      if (!finalObj.description) {
+        if (typeId === 'person') {
+          finalObj.description = `Author profile for ${post.authorName || 'Admin'}`
+        } else if (typeId === 'organization' || typeId === 'website') {
+          finalObj.description = `Official website for ${siteData?.name || 'Website'}`
+        } else {
+          finalObj.description = post.excerpt || ''
+        }
+      }
       
       // Inject global site data if available
       if (siteData?.globalSchemas && siteData.globalSchemas[typeLabel]) {
@@ -884,6 +900,7 @@ export async function publishPost(queueId: string): Promise<boolean> {
           schemas:      finalSchemaPayload,
           featuredMediaId,
           featuredUrl:  finalFeaturedUrl,
+          authorName:   post.authorName,
         })
       } catch (rmErr) {
         console.warn('[RankMath] Sync partially failed (non-critical):', rmErr)
@@ -1178,6 +1195,7 @@ export async function updateWordPressPost(queueId: string): Promise<boolean> {
           schemas:      finalSchemaPayload,
           featuredMediaId,
           featuredUrl:  finalFeaturedUrl,
+          authorName:   post.authorName,
         })
       } catch (e) {
         console.error('[RankMath] Sync Failed (Update):', e)
@@ -1203,13 +1221,15 @@ function buildPrompt(opts: {
   topic: string; tone: string; language: string; wordCount: number
   keywords: string[]; focusKeyword?: string; includeOutline: boolean; includeExcerpt: boolean
   includeTags: boolean; includeStats: boolean; includeFaq: boolean; includeQuotes: boolean; includeSchema: boolean
-  customPrompt: string; authorName: string; targetAudience: string; affiliateLink: string
+  customPrompt: string; authorName: string; targetAudience: string; affiliateLink: string; internalLink: string
+  requestedSchemas?: string[]
 }): string {
   const kwStr = opts.keywords.length ? `\nTarget keywords: ${opts.keywords.join(', ')}` : ''
   const customStr = opts.customPrompt ? `\nAdditional instructions: ${opts.customPrompt}` : ''
   const authorStr = opts.authorName ? `\nWritten by: ${opts.authorName}` : ''
   const audienceStr = opts.targetAudience ? `\nTarget audience: ${opts.targetAudience}` : ''
   const affiliateStr = opts.affiliateLink ? `\nIMPORTANT: Naturally integrate this affiliate link: ${opts.affiliateLink}` : ''
+  const internalStr = opts.internalLink ? `\nIMPORTANT: Naturally integrate this internal link: ${opts.internalLink}` : ''
   const focusKeyword = opts.focusKeyword || opts.keywords[0] || opts.topic
 
   return `UNIVERSAL SEO + AI OVERVIEW CONTENT PROMPT
@@ -1225,7 +1245,7 @@ Also, list all possible keywords to rank on AI overview, ChatGPT, Gemini, and Cl
 Use this prompt for the topic: "${opts.topic}"
 Focus Keyword: "${focusKeyword}"
 Core optimization targets: AI overview, chatgpt, gemini, claude, perplexity, co-pilot, AI mode, and LSI keyword friendly structures to ensure the content is easily extractable by generative engines.
-${kwStr}${audienceStr}${authorStr}${affiliateStr}${customStr}
+${kwStr}${audienceStr}${authorStr}${affiliateStr}${internalStr}${customStr}
 
 WORD COUNT — NON-NEGOTIABLE:
 - The bodyContent MUST contain a minimum of ${Math.max(opts.wordCount, 1500)} words of actual readable text (not counting HTML tags).
@@ -1245,7 +1265,7 @@ HUMANIZATION — WRITE LIKE A REAL EXPERT HUMAN:
 CONTENT REQUIREMENTS:
 - Use natural, human tone — target under 20% AI feel on AI detectors
 - Avoid em dashes (—), emojis, special separators
-- Write in clear, structured paragraphs
+- Write in clear, structured paragraphs. MANDATORY: Keep paragraphs short and punchy (maximum 3-4 sentences). Avoid long blocks of text.
 - MANDATORY: DO NOT NUMBER SECTION HEADINGS (e.g., Use "Quick Verdict Summary" instead of "9. Quick Verdict Summary").
 - Language: ${opts.language === 'id' ? 'Indonesian (Bahasa Indonesia)' : opts.language}
 - Tone: ${opts.tone}
@@ -1309,7 +1329,11 @@ Please respond ONLY with raw valid JSON — no markdown, no code fences, no extr
   "metaDescription": "Action-oriented description with focus keyword — STRICTLY EXACTLY 155 characters including spaces",
   "aiOverview": "70-100 word AI-extractable summary snippet",
   "bodyContent": "Complete article HTML — MINIMUM ${Math.max(opts.wordCount, 1500)} words of readable text, fully developed sections",
-  "tags": ["tag1", "tag2", "tag3"]
+  "tags": ["tag1", "tag2", "tag3"],
+  "schemas": [
+    // Array of valid JSON-LD schema objects matching the requested types: ${opts.requestedSchemas?.join(', ') || 'None'}.
+    // Fill them with highly specific content based on the article (e.g., actual steps for HowTo, actual items for ItemList).
+  ]
 }`
 }
 
@@ -1383,9 +1407,10 @@ export async function generateContent(opts: {
   topic: string; tone: string; language: string; wordCount: number
   keywords: string[]; focusKeyword?: string; includeOutline: boolean; includeExcerpt: boolean
   includeTags: boolean; includeStats: boolean; includeFaq: boolean; includeQuotes: boolean; includeSchema: boolean
-  customPrompt: string; providerId: string; model: string; authorName: string; targetAudience: string; affiliateLink: string
+  customPrompt: string; providerId: string; model: string; authorName: string; targetAudience: string; affiliateLink: string; internalLink: string
+  requestedSchemas?: string[]
   abortSignal?: AbortSignal
-}): Promise<{ title: string; content: string; excerpt: string; tags: string[] }> {
+}): Promise<{ title: string; content: string; excerpt: string; tags: string[]; schemas?: any[] }> {
   const apiKey = appStore.apiKeys[opts.providerId]
   if (!apiKey) throw new Error(`No API key set for ${opts.providerId}. Go to Settings → API Keys.`)
 
@@ -1469,7 +1494,8 @@ export async function generateContent(opts: {
     title: parsed.metaTitle || parsed.title || 'Untitled Post',
     content,
     excerpt: parsed.metaDescription || parsed.excerpt || '',
-    tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 3) : []
+    tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 3) : [],
+    schemas: Array.isArray(parsed.schemas) ? parsed.schemas : (parsed.schema ? [parsed.schema] : [])
   }
 }
 

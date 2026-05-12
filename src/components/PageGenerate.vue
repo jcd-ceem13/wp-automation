@@ -14,6 +14,7 @@ const authorName     = ref(appStore.settings.defaultAuthorName)
 const authorId       = ref<number | null>(appStore.settings.defaultAuthorId || null)
 const targetAudience = ref(appStore.settings.defaultAudience || 'General Audience')
 const affiliateLink   = ref('')
+const internalLink    = ref('')
 const focusKeyword    = ref('')
 const slug            = ref('')
 const imageDescription = ref('')
@@ -426,7 +427,9 @@ async function handleGenerate() {
       authorName:     authorName.value,
       targetAudience: targetAudience.value,
       affiliateLink:  affiliateLink.value,
+      internalLink:   internalLink.value,
       providerId:     selectedProvider.value,
+      requestedSchemas: selectedSchemas.value,
       model:          appStore.selectedModels[selectedProvider.value] || activeProvider.value?.defaultModel || '',
       abortSignal:    abortController.value?.signal
     })
@@ -440,6 +443,22 @@ async function handleGenerate() {
       const escapedKW = activeFocusKeyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       const kwRegex = new RegExp(`(${escapedKW})`, 'i')
       finalContent = finalContent.replace(kwRegex, '<dfn>$1</dfn>')
+    }
+
+    // Insert 1 automatic internal link in related topic (secondary keywords)
+    if (internalLink.value) {
+      const secondaryKws = keywords.value.split(',').map(k => k.trim()).filter(Boolean)
+      for (const kw of secondaryKws) {
+        if (kw.toLowerCase() !== activeFocusKeyword.toLowerCase()) {
+          const escapedKW = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          const kwRegex = new RegExp(`\\b(${escapedKW})\\b`, 'i')
+          if (kwRegex.test(finalContent)) {
+            finalContent = finalContent.replace(kwRegex, `<a href="${internalLink.value}">$1</a>`)
+            console.log(`[Internal Link] Auto-linked keyword: "${kw}"`)
+            break // Only insert 1 link
+          }
+        }
+      }
     }
     
     const validImages = imageUrls.value.filter(url => url.trim() !== '')
@@ -539,6 +558,7 @@ async function handleGenerate() {
       content:    finalContent,
       excerpt:    result.excerpt,
       tags:       result.tags,
+      schemas:    result.schemas,
       categories: categories.value.split(',').map(c => c.trim()).filter(Boolean),
       siteId:     selectedSiteId.value,
       aiProvider: selectedProvider.value,
@@ -592,6 +612,7 @@ function resetForm() {
   slug.value = ''
   customPrompt.value = ''
   affiliateLink.value = ''
+  internalLink.value = ''
   imageUrls.value = ['', '', '']
   imageAlts.value = ['', '', '']
   
@@ -792,7 +813,7 @@ const seoScore = computed(() => {
               <input v-model="slug" class="form-input" placeholder="post-slug-here" @input="onSlugInput" />
             </div>
           </div>
-          <div class="form-grid-inner mt-3">
+          <div class="form-grid-3 mt-3">
             <div class="form-group">
               <label class="form-label">Author Name</label>
               <input v-model="authorName" class="form-input" placeholder="Shame Cee" />
@@ -800,6 +821,10 @@ const seoScore = computed(() => {
             <div class="form-group">
               <label class="form-label">Affiliate Link</label>
               <input v-model="affiliateLink" class="form-input" placeholder="https://example.com/ref/123" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Internal Link (Optional)</label>
+              <input v-model="internalLink" class="form-input" placeholder="https://example.com/posts/..." />
             </div>
           </div>
         </div>

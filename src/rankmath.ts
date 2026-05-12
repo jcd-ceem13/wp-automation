@@ -27,6 +27,7 @@ export interface RankMathSyncOptions {
   schemas:        any[]    // array of schema objects with @type
   featuredMediaId?: number
   featuredUrl?:   string
+  authorName?:    string
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -164,7 +165,9 @@ export async function syncRankMathMeta(opts: RankMathSyncOptions): Promise<boole
       schemaStr = schemaStr
         .replace(/\{\{title\}\}/g,      opts.title)
         .replace(/\{\{excerpt\}\}/g,    opts.description)
-        .replace(/\{\{authorName\}\}/g, 'Admin')
+        .replace(/\{\{authorName\}\}/g, opts.authorName || 'Admin')
+        .replace(/%keywords%/g,         opts.focusKeyword || '')
+        .replace(/\{\{keywords\}\}/g,   opts.focusKeyword || '')
 
       let parsedSchema: any;
       try { parsedSchema = JSON.parse(schemaStr) } 
@@ -249,7 +252,9 @@ export async function syncRankMathSchemas(opts: RankMathSyncOptions): Promise<bo
     schemaStr = schemaStr
       .replace(/\{\{title\}\}/g,      opts.title)
       .replace(/\{\{excerpt\}\}/g,    opts.description)
-      .replace(/\{\{authorName\}\}/g, 'Admin')
+      .replace(/\{\{authorName\}\}/g, opts.authorName || 'Admin')
+      .replace(/%keywords%/g,         opts.focusKeyword || '')
+      .replace(/\{\{keywords\}\}/g,   opts.focusKeyword || '')
 
     let finalProps: Record<string, unknown>
     try {
