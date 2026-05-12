@@ -51,6 +51,7 @@ export interface PostQueue {
   authorId?: number
   affiliateLink?: string
   selectedSchemas?: string[]
+  schemas?: any[]
 }
 
 export interface GenerateOptions {

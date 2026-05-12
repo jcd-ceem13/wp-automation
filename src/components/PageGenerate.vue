@@ -615,6 +615,56 @@ async function handlePublishNow() {
     appStore.activePage = 'queue' // Send them to queue/published list to see it
   }
 }
+
+// ── SEO Score (display-only, no logic changes) ─────────────────────────────
+const seoScore = computed(() => {
+  const post = generatedPost.value
+  if (!post) return null
+
+  const content: string = post.content || ''
+  const title: string   = post.title || ''
+  const kw: string      = (post.focusKeyword || focusKeyword.value || '').toLowerCase().trim()
+  const plainText = content.replace(/<[^>]+>/g, ' ').toLowerCase()
+  const wc: number = post.wordCount || 0
+
+  const checks = [
+    // 1. Word count ≥ 800
+    { label: 'Word Count ≥ 800',      pass: wc >= 800,      points: 10, tip: `${wc} words` },
+    // 2. Word count ≥ 1500
+    { label: 'Word Count ≥ 1,500',    pass: wc >= 1500,     points: 10, tip: `${wc} words` },
+    // 3. Focus keyword in title
+    { label: 'Keyword in Title',      pass: kw ? title.toLowerCase().includes(kw) : false, points: 15, tip: kw ? `"${kw}"` : 'No keyword set' },
+    // 4. Focus keyword in first 100 words of content
+    { label: 'Keyword in Intro',      pass: kw ? plainText.split(' ').slice(0, 100).join(' ').includes(kw) : false, points: 10, tip: kw ? 'First 100 words' : 'No keyword set' },
+    // 5. Keyword density 0.5-2.5%
+    { label: 'Keyword Density',       pass: kw && wc > 0 ? (() => { const occ = (plainText.match(new RegExp(kw, 'g')) || []).length; const d = (occ / wc) * 100; return d >= 0.5 && d <= 2.5 })() : false, points: 10, tip: kw && wc > 0 ? (() => { const occ = (plainText.match(new RegExp(kw, 'g')) || []).length; return `${((occ / wc) * 100).toFixed(2)}%` })() : 'N/A' },
+    // 6. Title length 40-65 chars
+    { label: 'Title Length (40-65)',   pass: title.length >= 40 && title.length <= 65, points: 10, tip: `${title.length} chars` },
+    // 7. Has excerpt
+    { label: 'Meta Excerpt Present',  pass: !!(post.excerpt && post.excerpt.trim().length > 20), points: 10, tip: post.excerpt ? `${post.excerpt.length} chars` : 'Missing' },
+    // 8. Has tags
+    { label: 'Tags Generated',        pass: !!(post.tags && post.tags.length >= 3), points: 5, tip: post.tags?.length ? `${post.tags.length} tags` : 'None' },
+    // 9. Has FAQ section
+    { label: 'FAQ Section',           pass: includeFaq.value && /faq|frequently asked/i.test(content), points: 5, tip: includeFaq.value ? 'Detected' : 'Disabled' },
+    // 10. Schema markup enabled
+    { label: 'Schema Markup',         pass: includeSchema.value && selectedSchemas.value.length > 0, points: 5, tip: includeSchema.value ? `${selectedSchemas.value.length} schemas` : 'Off' },
+    // 11. Featured image set
+    { label: 'Featured Image',        pass: !!(imageUrls.value[0] || post.featuredImageUrl), points: 5, tip: (imageUrls.value[0] || post.featuredImageUrl) ? 'Set' : 'Missing' },
+    // 12. URL slug present
+    { label: 'URL Slug Set',          pass: !!(post.slug && post.slug.trim()), points: 5, tip: post.slug || 'Auto-generated' },
+  ]
+
+  const maxPoints = checks.reduce((s, c) => s + c.points, 0)
+  const earned    = checks.filter(c => c.pass).reduce((s, c) => s + c.points, 0)
+  const score     = Math.round((earned / maxPoints) * 100)
+
+  const grade = score >= 80 ? { label: 'Excellent', color: '#10b981', bg: 'rgba(16,185,129,0.1)', border: 'rgba(16,185,129,0.25)' }
+              : score >= 60 ? { label: 'Good',      color: '#f59e0b', bg: 'rgba(245,158,11,0.1)', border: 'rgba(245,158,11,0.25)' }
+              : score >= 40 ? { label: 'Needs Work', color: '#f97316', bg: 'rgba(249,115,22,0.1)', border: 'rgba(249,115,22,0.25)' }
+              :               { label: 'Poor',       color: '#ef4444', bg: 'rgba(239,68,68,0.1)',  border: 'rgba(239,68,68,0.25)' }
+
+  return { score, grade, checks, earned, maxPoints }
+})
 </script>
 
 <template>
@@ -800,7 +850,7 @@ async function handlePublishNow() {
               <div class="img-controls mt-2">
                 <button v-if="!imageUrls[i]" class="btn-gen-img" @click.stop.prevent="generateImage(i)" :disabled="generatingImg === i">
                   <span v-if="generatingImg === i" class="spinner-tiny" />
-                  {{ generatingImg === i ? 'Generating...' : 'AI Generate' }}
+                  {{ generatingImg === i ? 'Generating...' : 'AI Generate (Optional)' }}
                 </button>
                 <input v-model="imageAlts[i]" class="form-input-sm w-full" placeholder="SEO Alt Text..." @change="syncImageAlt(i)" />
               </div>
@@ -958,13 +1008,22 @@ async function handlePublishNow() {
         </button>
       </div>
 
-      <div v-if="generatedPost && !generating" class="success-banner-inline mt-3">
-        <div class="banner-icon">🎯</div>
-        <div class="banner-content">
-          <div class="banner-title">Post Sent to Queue!</div>
-          <div class="banner-desc">Your content is ready for review in the <strong>Manage Posts</strong> tab.</div>
+      <!-- Premium Success Banner -->
+      <div v-if="generatedPost && !generating" class="premium-success-card mt-4">
+        <div class="success-glow"></div>
+        <div class="success-content-wrapper">
+          <div class="success-icon-badge">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"></path></svg>
+          </div>
+          <div class="success-text-group">
+            <h4 class="success-heading">Post Successfully Queued!</h4>
+            <p class="success-subtext">Your high-quality AI content is now ready for final review and refinement in the posts management center.</p>
+          </div>
+          <button class="btn btn-primary btn-success-action" @click="appStore.activePage = 'queue'">
+            <span>Manage Queue</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="M12 5l7 7-7 7"></path></svg>
+          </button>
         </div>
-        <button class="btn btn-primary btn-sm" @click="appStore.activePage = 'queue'">View in Queue</button>
       </div>
     </div>
 
@@ -993,6 +1052,47 @@ async function handlePublishNow() {
             {{ generatedPost.tags.join(', ') }}
           </span>
         </div>
+
+        <!-- SEO Score Panel (display-only) -->
+        <div v-if="seoScore" class="seo-score-panel">
+          <!-- Header row -->
+          <div class="seo-score-header">
+            <div class="seo-score-left">
+              <div class="seo-score-ring" :style="{ '--score-color': seoScore.grade.color, '--score-pct': seoScore.score }">
+                <svg viewBox="0 0 36 36" class="ring-svg">
+                  <circle class="ring-bg" cx="18" cy="18" r="15.9" />
+                  <circle class="ring-fill" cx="18" cy="18" r="15.9"
+                    :stroke="seoScore.grade.color"
+                    :stroke-dasharray="`${seoScore.score} ${100 - seoScore.score}`"
+                    stroke-dashoffset="25" />
+                </svg>
+                <div class="ring-label">
+                  <span class="ring-number">{{ seoScore.score }}</span>
+                  <span class="ring-unit">/ 100</span>
+                </div>
+              </div>
+              <div class="seo-score-summary">
+                <div class="seo-grade-badge" :style="{ color: seoScore.grade.color, background: seoScore.grade.bg, borderColor: seoScore.grade.border }">
+                  {{ seoScore.grade.label }}
+                </div>
+                <div class="seo-score-title">SEO Score</div>
+                <div class="seo-score-sub">{{ seoScore.earned }} / {{ seoScore.maxPoints }} points earned</div>
+              </div>
+            </div>
+            <div class="seo-score-right">
+              <div v-for="check in seoScore.checks" :key="check.label" class="seo-check-row">
+                <div class="seo-check-icon" :class="check.pass ? 'pass' : 'fail'">
+                  <svg v-if="check.pass" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  <svg v-else width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </div>
+                <span class="seo-check-label" :class="check.pass ? 'pass' : 'fail'">{{ check.label }}</span>
+                <span class="seo-check-tip">{{ check.tip }}</span>
+                <span class="seo-check-pts" :class="check.pass ? 'pass' : 'fail'">+{{ check.points }}pt</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="preview-content-box" v-html="generatedPost.content"></div>
 
         <!-- Auto-Generated Schema Preview -->
@@ -1045,29 +1145,44 @@ async function handlePublishNow() {
       </div>
     </div>
 
-    <!-- Generating Modal Overlay -->
-    <div v-if="generating" class="modal-overlay">
-      <div class="modal-content loading-modal">
-        <div class="premium-loader">
-          <div class="loader-ring"></div>
-          <div class="loader-ring"></div>
-          <div class="loader-ring"></div>
-          <div class="loader-icon">✨</div>
+    <!-- Unique 'Aether' Loading Modal -->
+    <div v-if="generating" class="modal-overlay aether-overlay">
+      <div class="modal-content aether-modal">
+        <div class="aether-loader-wrap">
+          <div class="orbit-ring ring-1"></div>
+          <div class="orbit-ring ring-2"></div>
+          <div class="orbit-ring ring-3"></div>
+          <div class="aether-core">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="url(#aether-grad)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <defs>
+                <linearGradient id="aether-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" style="stop-color:#8b5cf6" />
+                  <stop offset="100%" style="stop-color:#06b6d4" />
+                </linearGradient>
+              </defs>
+              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path>
+            </svg>
+          </div>
         </div>
         
-        <div class="loading-text-wrap">
-          <h3 class="loading-title">Crafting Your Masterpiece...</h3>
-          <p class="loading-desc">Our AI is semantically arranging your content for maximum impact and SEO performance. This usually takes 30-60 seconds.</p>
+        <div class="aether-text-section">
+          <h3 class="aether-title">Generating Your Content</h3>
+          <p class="aether-desc">Our neural engine is weaving your ideas into a high-performance SEO masterpiece. This usually takes 30-60 seconds.</p>
         </div>
 
-        <div class="loading-status">
-          <div class="loading-bar">
-            <div class="loading-bar-fill"></div>
+        <div class="aether-progress-section">
+          <div class="aether-bar-container">
+            <div class="aether-bar-fill">
+              <div class="aether-glimmer"></div>
+            </div>
           </div>
-          <span class="status-label">Researching & Writing...</span>
+          <div class="aether-status-row">
+            <span class="aether-status-text">Processing Semantics</span>
+            <span class="aether-percentage">AI Sync Active</span>
+          </div>
         </div>
 
-        <button class="btn-cancel-minimal" @click="abortController?.abort()">
+        <button class="aether-cancel-btn" @click="abortController?.abort()">
           <span>Cancel Generation</span>
         </button>
       </div>
@@ -1081,6 +1196,17 @@ async function handlePublishNow() {
 .form-grid-inner { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .form-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .full-span  { grid-column: 1 / -1; }
+
+@media (max-width: 1024px) {
+  .form-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 768px) {
+  .generate-page { gap: 16px; }
+  .form-grid-inner { grid-template-columns: 1fr; }
+  .form-grid-3 { grid-template-columns: 1fr; }
+  .form-section { padding: 16px; }
+}
 
 .form-section {
   background: var(--bg-card);
@@ -1147,19 +1273,21 @@ async function handlePublishNow() {
 }
 
 @media (max-width: 768px) {
-  .gen-form.card { padding: 20px 16px; }
-  .section-label { white-space: normal; }
+  .generate-page { gap: 16px; padding: 12px; }
+  .gen-form.card { padding: 20px 12px; }
+  .form-grid-inner { grid-template-columns: 1fr; }
+  .form-grid-3 { grid-template-columns: 1fr; }
+  .form-section { padding: 16px; }
+  .section-label { white-space: normal; font-size: 0.9rem; }
 }
 
 
 .options-grid {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
-  overflow-x: auto;
   padding-bottom: 4px;
-  scrollbar-width: none; /* Hide scrollbar Firefox */
 }
-.options-grid::-webkit-scrollbar { display: none; } /* Hide scrollbar Chrome/Safari */
 
 .toggle-pill {
   display: flex;
@@ -1176,6 +1304,7 @@ async function handlePublishNow() {
   transition: all 0.2s;
   user-select: none;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .toggle-pill.active {
   border-color: var(--purple);
@@ -1183,6 +1312,30 @@ async function handlePublishNow() {
   background: rgba(139, 92, 246, 0.04);
 }
 .toggle-pill:hover { border-color: var(--purple); }
+
+.schema-chip-list, .cat-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cat-chip {
+  padding: 6px 12px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.cat-chip.active {
+  background: rgba(139, 92, 246, 0.1);
+  border-color: var(--purple);
+  color: var(--purple);
+}
 
 .pill-switch {
   width: 32px;
@@ -1334,8 +1487,27 @@ async function handlePublishNow() {
   .switch-knob { width: 12px; height: 12px; }
   .toggle-pill.active .switch-knob { left: 14px; }
   .form-input, .form-select, .form-textarea { padding: 8px 10px; font-size: 0.85rem; }
-  .card-header { gap: 8px; padding-bottom: 12px; }
+  .card-header { 
+    flex-direction: column; 
+    align-items: flex-start; 
+    gap: 12px; 
+    padding-bottom: 12px; 
+  }
   .card-title { font-size: 0.9rem; }
+  .card-header > div {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 6px !important;
+  }
+  .card-header .btn {
+    flex: 1;
+    min-width: 120px;
+    justify-content: center;
+  }
+  .toggle-pill {
+    flex: 1 1 calc(50% - 5px);
+    justify-content: flex-start;
+  }
 }
 
 
@@ -1358,9 +1530,9 @@ async function handlePublishNow() {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  max-height: 200px;
+  max-height: 250px;
   overflow-y: auto;
-  padding: 4px;
+  padding: 8px 4px;
 }
 
 .cat-chip {
@@ -1401,132 +1573,151 @@ async function handlePublishNow() {
 }
 
 .preview-title {
-  font-size: 2rem;
+  font-size: 1.65rem;
   font-weight: 800;
-  margin-bottom: 12px;
+  color: var(--text-primary);
+  margin: 0 0 12px 0;
   line-height: 1.2;
+  letter-spacing: -0.02em;
 }
 
 .preview-meta {
   display: flex;
-  gap: 16px;
-  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 24px;
+  color: var(--text-secondary);
   font-size: 0.85rem;
-  color: var(--text-muted);
-  margin-bottom: 32px;
-  background: var(--bg-deep);
-  padding: 8px 16px;
-  border-radius: 10px;
-  width: fit-content;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
 }
 
 .meta-item {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-weight: 600;
+  background: var(--bg-deep);
+  padding: 6px 12px;
+  border-radius: 8px;
 }
 
 .preview-content-box {
   font-size: 1.05rem;
   line-height: 1.8;
+  color: #1e293b;
 }
 
 .preview-content-box h2 {
-  font-size: 1.5rem;
-  margin-top: 2rem;
-  margin-bottom: 1rem;
-  border-bottom: 2px solid var(--bg-deep);
+  font-size: 1.45rem;
+  font-weight: 800;
+  color: #0f172a;
+  margin: 2rem 0 1rem 0;
   padding-bottom: 8px;
+  border-bottom: 2px solid #f1f5f9;
+  scroll-margin-top: 100px;
+  line-height: 1.3;
 }
 
 .preview-content-box h3 {
-  font-size: 1.25rem;
-  margin-top: 1.5rem;
-  margin-bottom: 0.75rem;
+  font-size: 1.2rem;
+  font-weight: 800;
+  color: #1e293b;
+  margin: 1.5rem 0 0.75rem 0;
+  scroll-margin-top: 100px;
+  line-height: 1.4;
+}
+
+.preview-content-box h4 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #334155;
+  margin: 2rem 0 0.75rem 0;
+  line-height: 1.5;
+}
+
+.preview-content-box h5 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #475569;
+  margin: 1.5rem 0 0.5rem 0;
 }
 
 .preview-content-box p {
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.25rem;
+  color: #334155;
+  font-size: 1rem;
+}
+
+.preview-content-box ul, 
+.preview-content-box ol {
+  margin: 1.5rem 0;
+  padding-left: 1.75rem;
+}
+
+.preview-content-box li {
+  margin-bottom: 0.75rem;
+}
+
+.preview-content-box strong {
+  color: #0f172a;
+  font-weight: 700;
 }
 
 /* Table of Contents Styling */
 .preview-content-box .toc-container {
-  background: var(--bg-deep);
-  padding: 32px;
-  border-radius: 20px;
-  border: 1.5px solid var(--border);
-  margin: 40px 0;
-  box-shadow: inset 0 2px 4px rgba(0,0,0,0.02);
+  padding: 0;
+  margin: 2rem 0;
 }
 
 .preview-content-box .toc-container h2 {
   margin-top: 0;
-  border-bottom: 2px solid rgba(139, 92, 246, 0.1);
-  color: var(--purple);
-  font-size: 1.4rem;
-  padding-bottom: 12px;
+  color: #6366f1;
+  font-size: 1.25rem;
+  font-weight: 800;
+  margin-bottom: 1rem;
 }
 
 .preview-content-box .toc-container ol, 
 .preview-content-box .toc-container ul {
-  margin-bottom: 0;
-  padding-left: 1.2rem;
+  margin: 0;
+  padding-left: 1.5rem;
+  list-style-type: decimal;
+}
+
+.preview-content-box .toc-container ul {
+  list-style-type: disc;
 }
 
 .preview-content-box .toc-container li {
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   font-weight: 500;
+  color: #6366f1;
 }
 
 .preview-content-box .toc-container li a {
-  color: var(--text-primary);
+  color: #6366f1;
   text-decoration: none;
-  transition: all 0.2s;
 }
 
 .preview-content-box .toc-container li a:hover {
-  color: var(--purple);
-  padding-left: 4px;
-}
-
-.preview-content-box ol, .preview-content-box ul {
-  margin-bottom: 1.5rem;
-  padding-left: 1.5rem;
-}
-
-.preview-content-box li {
-  margin-bottom: 0.5rem;
+  text-decoration: underline;
 }
 
 .preview-content-box .ai-overview-box {
-  background: linear-gradient(135deg, #fdfcfb 0%, #f5f7fa 100%);
-  border: 1px solid rgba(139, 92, 246, 0.2);
-  border-left: 6px solid var(--purple);
-  border-radius: 16px;
-  padding: 32px;
-  margin-bottom: 40px;
+  background: #fefce8;
+  border: 1px solid #fef08a;
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 24px;
   position: relative;
   overflow: hidden;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.03);
-}
-
-.preview-content-box .ai-overview-box::before {
-  content: "✨ AI SUMMARY";
-  position: absolute;
-  top: 12px;
-  right: 16px;
-  font-size: 0.65rem;
-  font-weight: 900;
-  color: var(--purple);
-  opacity: 0.6;
-  letter-spacing: 0.05em;
 }
 
 .preview-content-box .ai-overview-box div {
-  font-size: 1.1rem !important;
+  font-size: 1rem !important;
   color: #2c3e50 !important;
-  line-height: 1.8 !important;
+  line-height: 1.6 !important;
   font-style: italic;
 }
 
@@ -1645,129 +1836,208 @@ async function handlePublishNow() {
   max-width: 440px;
 }
 
-/* Premium Loader */
-.premium-loader {
-  position: relative;
-  width: 100px;
-  height: 100px;
-  margin-bottom: 32px;
+/* Unique 'Aether' Loading Modal Styles */
+.aether-overlay {
+  background: rgba(15, 23, 42, 0.4);
+  backdrop-filter: blur(12px);
+  z-index: 10000;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.loader-ring {
+.aether-modal {
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 28px;
+  padding: 32px 36px;
+  max-width: 380px;
+  width: 90%;
+  text-align: center;
+  box-shadow: 
+    0 20px 40px -12px rgba(0, 0, 0, 0.2),
+    0 0 30px rgba(139, 92, 246, 0.08);
+  animation: aetherPop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.aether-loader-wrap {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  margin: 0 auto 36px auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.orbit-ring {
   position: absolute;
-  inset: 0;
-  border: 3px solid transparent;
-  border-top-color: var(--purple);
+  border: 2px solid transparent;
   border-radius: 50%;
-  animation: ring-spin 2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
 }
 
-.loader-ring:nth-child(2) {
-  inset: 10px;
-  border-top-color: var(--cyan);
-  animation-duration: 1.5s;
-  animation-direction: reverse;
-}
-
-.loader-ring:nth-child(3) {
-  inset: 20px;
-  border-top-color: var(--violet);
-  animation-duration: 1s;
-}
-
-.loader-icon {
-  font-size: 2rem;
-  animation: pulse-icon 2s ease-in-out infinite;
-}
-
-@keyframes ring-spin {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes pulse-icon {
-  0%, 100% { transform: scale(1); filter: drop-shadow(0 0 10px rgba(139, 92, 246, 0.4)); }
-  50% { transform: scale(1.1); filter: drop-shadow(0 0 20px rgba(139, 92, 246, 0.6)); }
-}
-
-.loading-text-wrap {
-  margin-bottom: 32px;
-}
-
-.loading-title {
-  background: var(--grad-primary);
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  font-size: 1.6rem !important;
-  font-weight: 900 !important;
-  letter-spacing: -0.02em;
-}
-
-.loading-desc {
-  font-size: 0.95rem !important;
-  color: var(--text-muted) !important;
-  margin: 0 !important;
-}
-
-.loading-status {
+.ring-1 {
   width: 100%;
+  height: 100%;
+  border-top-color: #8b5cf6;
+  animation: orbitRotate 2s linear infinite;
+}
+
+.ring-2 {
+  width: 80%;
+  height: 80%;
+  border-right-color: #06b6d4;
+  animation: orbitRotate 1.5s linear infinite reverse;
+}
+
+.ring-3 {
+  width: 60%;
+  height: 60%;
+  border-bottom-color: #d946ef;
+  animation: orbitRotate 3s linear infinite;
+}
+
+.aether-core {
+  z-index: 2;
+  animation: corePulse 2s ease-in-out infinite;
+}
+
+.aether-text-section {
+  margin-bottom: 28px;
+}
+
+.aether-title {
+  background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  font-size: 1.4rem !important;
+  font-weight: 800 !important;
+  margin: 0 0 16px 0 !important;
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+}
+
+[data-theme="dark"] .aether-title {
+  color: #000 !important;
+  -webkit-text-fill-color: #000 !important;
+}
+
+.aether-desc {
+  font-size: 0.95rem !important;
+  color: #64748b !important;
+  line-height: 1.65 !important;
+  max-width: 300px;
+  margin: 0 auto !important;
+}
+
+.aether-progress-section {
+  margin-top: 16px;
   margin-bottom: 32px;
 }
 
-.loading-bar {
+.aether-bar-container {
   height: 6px;
-  background: var(--bg-deep);
-  border-radius: 10px;
+  background: #f1f5f9;
+  border-radius: 20px;
   overflow: hidden;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
+  position: relative;
 }
 
-.loading-bar-fill {
+.aether-bar-fill {
   height: 100%;
+  width: 40%;
+  background: linear-gradient(90deg, #8b5cf6, #06b6d4);
+  border-radius: 20px;
+  position: relative;
+  animation: aetherProgress 2s infinite ease-in-out;
+}
+
+.aether-glimmer {
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 30%;
-  background: var(--grad-primary);
-  border-radius: 10px;
-  animation: progress-move 2s infinite ease-in-out;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+  animation: glimmerMove 1.5s infinite;
 }
 
-@keyframes progress-move {
-  0% { transform: translateX(-100%); }
-  100% { transform: translateX(400%); }
+.aether-status-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
 }
 
-.status-label {
+.aether-status-text {
   font-size: 0.75rem;
   font-weight: 700;
-  color: var(--purple);
+  color: #8b5cf6;
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
 
-.btn-cancel-minimal {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  padding: 10px 24px;
-  border-radius: 12px;
-  font-size: 0.85rem;
+.aether-percentage {
+  font-size: 0.75rem;
   font-weight: 600;
+  color: #94a3b8;
+}
+
+.aether-cancel-btn {
+  background: white;
+  border: 1px solid #e2e8f0;
+  color: #64748b;
+  padding: 10px 24px;
+  border-radius: 14px;
+  font-size: 0.85rem;
+  font-weight: 700;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.btn-cancel-minimal:hover {
+.aether-cancel-btn:hover {
   background: #fff1f1;
-  color: var(--red);
+  color: #ef4444;
   border-color: #fecaca;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.1);
 }
 
+@keyframes orbitRotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
 
-@keyframes fadeInModal {
-  from { opacity: 0; transform: scale(0.95); }
-  to { opacity: 1; transform: scale(1); }
+@keyframes corePulse {
+  0%, 100% { transform: scale(1); opacity: 0.8; }
+  50% { transform: scale(1.1); opacity: 1; }
+}
+
+@keyframes aetherPop {
+  from { opacity: 0; transform: scale(0.9) translateY(20px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes aetherProgress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+@keyframes glimmerMove {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(400%); }
+}
+
+@media (max-width: 480px) {
+  .aether-modal {
+    padding: 32px 24px;
+    border-radius: 24px;
+  }
+  .aether-title { font-size: 1.5rem !important; }
+  .aether-desc { font-size: 0.85rem !important; }
+  .aether-loader-wrap { width: 100px; height: 100px; }
 }
 
 /* Result Preview Mobile Fixes */
@@ -1815,10 +2085,294 @@ async function handlePublishNow() {
   .schema-grid {
     grid-template-columns: 1fr !important;
   }
+
+  .schema-preview-box pre {
+    max-height: 180px !important;
+    font-size: 0.65rem !important;
+  }
+}
+
+/* Image Results Grid */
+.image-results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+@media (max-width: 480px) {
+  .image-results-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+  .img-card {
+    height: 140px !important;
+  }
 }
 
 
 
+
+/* Premium Success Card */
+.premium-success-card {
+  position: relative;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 16px;
+  padding: 16px 20px;
+  overflow: hidden;
+  animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.success-glow {
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(circle, rgba(34, 197, 94, 0.05) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.success-content-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  z-index: 1;
+}
+
+.success-icon-badge {
+  width: 36px;
+  height: 36px;
+  background: #22c55e;
+  color: white;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 10px rgba(34, 197, 94, 0.2);
+  flex-shrink: 0;
+}
+
+.success-icon-badge svg {
+  width: 18px;
+  height: 18px;
+}
+
+.success-text-group {
+  flex: 1;
+}
+
+.success-heading {
+  margin: 0 0 2px 0 !important;
+  color: #166534 !important;
+  font-size: 1rem !important;
+  font-weight: 800 !important;
+}
+
+.success-subtext {
+  margin: 0 !important;
+  color: #15803d !important;
+  font-size: 0.85rem !important;
+  opacity: 0.8;
+  line-height: 1.4 !important;
+}
+
+.btn-success-action {
+  background: #166534;
+  border: none;
+  color: white;
+  padding: 10px 18px;
+  border-radius: 10px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s;
+}
+
+.btn-success-action:hover {
+  background: #14532d;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(22, 101, 52, 0.3);
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 768px) {
+  .success-content-wrapper {
+    flex-direction: column;
+    text-align: center;
+    gap: 16px;
+  }
+  .btn-success-action {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+/* ── SEO Score Panel ──────────────────────────────────────────────────── */
+.seo-score-panel {
+  margin: 20px 0 24px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 20px 24px;
+  animation: slideUp 0.4s ease;
+}
+
+.seo-score-header {
+  display: flex;
+  gap: 28px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.seo-score-left {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-shrink: 0;
+}
+
+/* Circular ring */
+.seo-score-ring {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  flex-shrink: 0;
+}
+.ring-svg {
+  width: 80px;
+  height: 80px;
+  transform: rotate(-90deg);
+}
+.ring-bg {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 3.2;
+}
+.ring-fill {
+  fill: none;
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  transition: stroke-dasharray 1s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.ring-number {
+  font-size: 1.4rem;
+  font-weight: 900;
+  color: var(--text-primary);
+}
+.ring-unit {
+  font-size: 0.55rem;
+  color: var(--text-muted);
+  font-weight: 700;
+  margin-top: 1px;
+}
+
+.seo-score-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.seo-grade-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  width: fit-content;
+}
+.seo-score-title {
+  font-size: 1rem;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+.seo-score-sub {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* Right column: checklist */
+.seo-score-right {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 16px;
+  min-width: 0;
+}
+
+.seo-check-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.seo-check-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.seo-check-icon.pass { background: rgba(16,185,129,0.15); color: #10b981; }
+.seo-check-icon.fail { background: rgba(239,68,68,0.12); color: #ef4444; }
+
+.seo-check-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.seo-check-label.pass { color: var(--text-secondary); }
+.seo-check-label.fail { color: var(--text-muted); }
+
+.seo-check-tip {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.seo-check-pts {
+  font-size: 0.65rem;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+.seo-check-pts.pass { color: #10b981; }
+.seo-check-pts.fail { color: var(--text-muted); opacity: 0.5; }
+
+@media (max-width: 768px) {
+  .seo-score-header { flex-direction: column; gap: 16px; }
+  .seo-score-right { grid-template-columns: 1fr; }
+}
 
 </style>
 

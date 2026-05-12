@@ -34,12 +34,12 @@ async function confirmDelete() {
   const { siteId, post } = deleteData.value
   
   showDeleteModal.value = false
-  const success = await deletePostFromWordPress(siteId, post.id)
-  if (success) {
+  const result = await deletePostFromWordPress(siteId, post.id)
+  if (result.success) {
     showToast('success', 'Post Deleted', 'Successfully removed from WordPress.')
     sitePosts.value[siteId] = (sitePosts.value[siteId] || []).filter((p: any) => p.id !== post.id)
   } else {
-    showToast('error', 'Delete Failed', 'Check your site connection and permissions.')
+    showToast('error', 'Delete Failed', result.error || 'Check your site connection and permissions.')
   }
   deleteData.value = null
 }
@@ -138,7 +138,7 @@ onMounted(fetchAllPosts)
     <ModalConfirm
       :show="showDeleteModal"
       title="Delete Post?"
-      message="This will permanently remove the image from your WordPress media library. This action cannot be undone."
+      message="This will permanently remove the post from your WordPress site. This action cannot be undone."
       confirmText="Yes, Delete"
       type="warning"
       @confirm="confirmDelete"

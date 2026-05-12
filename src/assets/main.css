@@ -36,15 +36,15 @@
   --pink:       #ec4899;
 
   /* ── Text ── */
-  --text-primary:   #000000;
-  --text-secondary: #000000;
-  --text-muted:     #000000;
+  --text-primary:   #111827;
+  --text-secondary: #4b5563;
+  --text-muted:     #9ca3af;
   --text-accent:    #6366f1;
 
   /* ── Post Cards ── */
-  --post-title-color:   #000000;
-  --post-excerpt-color: #000000;
-  --post-meta-color:    #000000;
+  --post-title-color:   var(--text-primary);
+  --post-excerpt-color: var(--text-secondary);
+  --post-meta-color:    var(--text-muted);
 
   /* ── Sizing ── */
   --radius-sm:   6px;
@@ -79,9 +79,9 @@
   --bg-card-hover:  #1c1c35;
   --bg-input:       #1a1a2e;
   --border:         rgba(255,255,255,0.07);
-  --text-primary:   #ffffff;
-  --text-secondary: #ffffff;
-  --text-muted:     #ffffff;
+  --text-primary:   #f9fafb;
+  --text-secondary: #d1d5db;
+  --text-muted:     #9ca3af;
   --shadow-xs:      0 1px 3px rgba(0,0,0,0.4);
   --shadow-sm:      0 2px 8px rgba(0,0,0,0.5);
   --shadow-md:      0 4px 20px rgba(0,0,0,0.6);
@@ -193,7 +193,7 @@ a:hover { color: var(--violet); }
 .btn-sm   { padding: 6px 12px; font-size: 0.8rem; }
 .btn-lg   { padding: 12px 24px; font-size: 1rem; }
 .btn-icon { padding: 8px; border-radius: var(--radius-md); }
-.btn-full { width: 100%; justify-content: center; }
+.btn-full { width: 100%; justify-content: flex-start; }
 
 /* ── Form elements ── */
 .form-group  { display: flex; flex-direction: column; gap: 5px; }

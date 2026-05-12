@@ -127,7 +127,7 @@ function handleGenerateFromPost() {
       </div>
 
       <div class="schema-toolbar">
-        <div class="schema-tabs" style="display: flex; align-items: center; gap: 16px; flex-wrap: nowrap;">
+        <div class="schema-tabs" style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
           <label class="radio-label" style="white-space: nowrap;">
             <input type="radio" v-model="activeTab" value="catalog" />
             <span>Schema Catalog</span>
@@ -136,12 +136,12 @@ function handleGenerateFromPost() {
             <input type="radio" v-model="activeTab" value="templates" />
             <span>Your Templates</span>
           </label>
-          <div style="width: 1px; height: 20px; background: var(--border); margin: 0 4px;"></div>
-          <select v-model="selectedSite" class="form-select" style="min-width: 150px; max-width: 180px; padding: 4px 8px; font-size: 0.8rem; height: 28px;">
+          <div style="width: 1px; height: 20px; background: var(--border); margin: 0 4px; display: none;"></div>
+          <select v-model="selectedSite" class="form-select" style="min-width: 150px; max-width: 100%; padding: 4px 8px; font-size: 0.8rem; height: 28px; flex: 1;">
             <option value="">— Target Site —</option>
             <option v-for="s in appStore.sites" :key="s.id" :value="s.id">{{ s.name }}</option>
           </select>
-          <select v-if="selectedSite" v-model="selectedPostId" class="form-select" style="min-width: 180px; max-width: 250px; padding: 4px 8px; font-size: 0.8rem; height: 28px;">
+          <select v-if="selectedSite" v-model="selectedPostId" class="form-select" style="min-width: 180px; max-width: 100%; padding: 4px 8px; font-size: 0.8rem; height: 28px; flex: 1;">
             <option value="">— {{ loadingPosts ? 'Loading...' : 'Select Target Post (Optional)' }} —</option>
             <option v-for="p in posts" :key="p.id" :value="p.id.toString()">{{ p.title.rendered.replace(/&#\d+;/g, '') }}</option>
           </select>

@@ -2,14 +2,10 @@ import { reactive, watch, computed } from 'vue'
 import type { WordPressSite, PostQueue, AppSettings, AIProvider } from './types'
 import { AI_PROVIDERS } from './types'
 
-const RANK_MATH_ENDPOINTS = {
-  updateMeta: '/wp-json/rankmath/v1/updateMeta',
-  updateSchemas: '/wp-json/rankmath/v1/updateSchemas',
-  updateRedirection: '/wp-json/rankmath/v1/updateRedirection',
-  getFeaturedImageId: '/wp-json/rankmath/v1/getFeaturedImageId',
-  getHead: '/wp-json/rankmath/v1/getHead'
-}
+// ── RankMath sync module (correct payloads) ─────────────────────────────────
+import { syncAllRankMath, syncRankMathSchemas, getFeaturedImageId as resolveWPImageId } from './rankmath'
 
+// Kept locally for meta payload building in WP REST API body
 const RM_SNIPPET_MAP: Record<string, string> = {
   'article': 'article',
   'faqpage': 'faq',
@@ -51,19 +47,18 @@ export function extractFAQs(html?: string): { question: string; answer: string }
   const cleanHtml = html.replace(/\r\n/g, '\n').replace(/\s+/g, ' ')
 
   // 2. Identify the search area (FAQ section or entire content)
-  // We look for a header that contains "FAQ", "Question", etc.
-  const faqSectionMatch = cleanHtml.match(/<(h[234])[^>]*>(?:.*?FAQ.*?|.*?Frequently Asked.*?|.*?Questions.*?|.*?Q&A.*?)<\/h\1>(.*?)(?=<h1[^>]*>|$)/i)
+  // We look for a header that contains "FAQ", "Frequently Asked", etc.
+  const faqSectionMatch = cleanHtml.match(/<(h[2-6])[^>]*>(?:.*?FAQ.*?|.*?Frequently Asked.*?|.*?Questions.*?)<\/h\1>(.*?)(?=<h[1-6][^>]*>|$)/i)
   
-  // If we found a specific FAQ section, we use it, otherwise we search the whole document
-  // but we prefer the section if it has reasonable content
-  let searchIn: string = (faqSectionMatch && faqSectionMatch[2] && faqSectionMatch[2].length > 100) 
-    ? faqSectionMatch[2] 
-    : cleanHtml
+  let searchIn: string = cleanHtml
+  let isStrictSection = false
 
-  // 3. Strategy A: Tag-based question detection (Now including H2)
-  const tags = ['h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'p', 'li']
-  
-  // Loosened regex: Doesn't strictly require ? or : if it's a header
+  if (faqSectionMatch && faqSectionMatch[2] && faqSectionMatch[2].length > 50) {
+    searchIn = faqSectionMatch[2]
+    isStrictSection = true
+  }
+
+  // 3. Strategy A: Tag-based question detection
   const qRegex = new RegExp(`<(h[2-6]|strong|b)[^>]*>(.*?)<\/(?:h[2-6]|strong|b)>`, 'gi')
   
   let match: RegExpExecArray | null
@@ -73,23 +68,19 @@ export function extractFAQs(html?: string): { question: string; answer: string }
     match = qRegex.exec(searchIn)
     if (!match) break
     
-    if (!match[1]) continue
-    const tag = match[1].toLowerCase()
+    const tag = (match[1] || '').toLowerCase()
     const qRaw = (match[2] || '').replace(/<[^>]*>/g, '').trim()
     
-    // VALIDATION:
-    // - Must be a reasonable length
-    // - Must NOT be a common non-question label
-    const blacklisted = /^(Note|Disclaimer|Warning|Verdict|Introduction|Conclusion|Summary|Pros|Cons|Table of Content|Author|Source|Reference|Featured|Related)/i.test(qRaw)
+    // BLACKLIST: Common headings that are NOT FAQs
+    const blacklisted = /^(Note|Disclaimer|Warning|Verdict|Introduction|Conclusion|Summary|Pros|Cons|Advantages|Disadvantages|Table of Content|Author|Source|Reference|Featured|Related|Key Features|Core Strengths|Performance|Security|Reliability|Payment|Mobile Experience|Customer Support|Final Evaluation|Final Verdict|Quick Verdict)/i.test(qRaw)
     
-    // In FAQ sections, headers are almost always questions. 
-    // In general content, we prefer those with ? or : or specific starts.
-    const hasPunctuation = qRaw.includes('?') || qRaw.endsWith(':')
-    const isQuestiony = /^(What|How|Why|Can|Where|Who|When|Is|Are|Which|Does|Do)/i.test(qRaw)
+    const endsWithQuestion = qRaw.endsWith('?')
+    const isQuestiony = /^(What|How|Why|Can|Where|Who|When|Is|Are|Which|Does|Do|Should)/i.test(qRaw)
     
-    if (qRaw && qRaw.length > 8 && qRaw.length < 250 && !blacklisted) {
-      // If we're in a dedicated FAQ section, we're less strict
-      if (searchIn !== cleanHtml || hasPunctuation || isQuestiony || tag.startsWith('h')) {
+    if (qRaw && qRaw.length > 8 && qRaw.length < 200 && !blacklisted) {
+      // If we are in a dedicated section, we are more lenient.
+      // If searching the whole content, we REQUIRE it to look like a question.
+      if (isStrictSection || endsWithQuestion || isQuestiony) {
         matches.push({ q: qRaw, index: match.index, length: match[0].length })
       }
     }
@@ -104,11 +95,10 @@ export function extractFAQs(html?: string): { question: string; answer: string }
     const end = next ? next.index : searchIn.length
     
     let answerHtml = searchIn.substring(start, end).trim()
-    // Remove any remaining tags for the text version
     let answerText = answerHtml.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
     
-    // If the answer is too short, it's likely noise
-    if (answerText.length > 10 && answerText.length < 2500) {
+    // Filter out very short answers or answers that are just other tags
+    if (answerText.length > 15 && answerText.length < 2000) {
       faqs.push({ 
         question: current.q.endsWith('?') ? current.q : current.q + '?', 
         answer: answerText 
@@ -116,8 +106,8 @@ export function extractFAQs(html?: string): { question: string; answer: string }
     }
   }
 
-  // 5. Strategy B: Plain text fallback (Q: / A: / 1. ... ?)
-  if (faqs.length < 2) {
+  // 5. Strategy B: Plain text fallback (only if no FAQs found)
+  if (faqs.length === 0) {
     const text = searchIn.replace(/<[^>]*>/g, '\n').replace(/\n+/g, '\n')
     const fallbackRegex = /(?:^|\n)(?:Q|Question|Q\d+|\d+[\)\.])\s*:?\s*(.*?)(?:\?|\:|\n)\s*(?:A|Answer|Response|Ans)\s*:?\s*(.*?)(?=\n+(?:Q|Question|Q\d+|\d+[\)\.])|$)/gi
     while (true) {
@@ -125,23 +115,19 @@ export function extractFAQs(html?: string): { question: string; answer: string }
       if (!match) break
       const q = (match[1] || '').trim()
       const a = (match[2] || '').trim()
-      if (q.length > 8 && a.length > 10) {
-        faqs.push({ 
-          question: q.endsWith('?') ? q : q + '?', 
-          answer: a 
-        })
+      if (q.length > 10 && a.length > 15) {
+        faqs.push({ question: q.endsWith('?') ? q : q + '?', answer: a })
       }
     }
   }
 
-  // Final Cleanup: Deduplicate and limit
   const seen = new Set<string>()
   return faqs.filter(f => {
     const key = f.question.toLowerCase().replace(/[^\w]/g, '')
     if (seen.has(key)) return false
     seen.add(key)
     return true
-  }).slice(0, 8) // Limit to top 8 FAQs for SEO health
+  }).slice(0, 10) // Limit to 10 FAQs as per prompt
 }
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -390,6 +376,7 @@ export async function uploadMediaToWordPress(siteId: string, file: File): Promis
       method: 'POST',
       headers: {
         Authorization: `Basic ${creds}`,
+        'Content-Type': file.type,
         'Content-Disposition': `attachment; filename="${file.name}"`
       },
       body: file // WordPress API prefers binary body for media
@@ -568,9 +555,9 @@ export async function deletePost(id: string) {
   removeFromQueue(id)
 }
 
-export async function deletePostFromWordPress(siteId: string, wpPostId: number): Promise<boolean> {
+export async function deletePostFromWordPress(siteId: string, wpPostId: number): Promise<{ success: boolean; error?: string }> {
   const site = appStore.sites.find(s => s.id === siteId)
-  if (!site) return false
+  if (!site) return { success: false, error: 'Site not found.' }
   try {
     const creds = btoa(unescape(encodeURIComponent(`${site.username}:${site.appPassword}`)))
     const baseUrl = site.url.replace(/\/$/, '')
@@ -578,10 +565,16 @@ export async function deletePostFromWordPress(siteId: string, wpPostId: number):
       method: 'DELETE',
       headers: { Authorization: `Basic ${creds}` }
     })
-    return res.ok
-  } catch (e) {
+    
+    if (res.ok) {
+      return { success: true }
+    } else {
+      const err = await res.json().catch(() => ({}))
+      return { success: false, error: err.message || `HTTP ${res.status}` }
+    }
+  } catch (e: any) {
     console.error('Failed to delete post from WordPress:', e)
-    return false
+    return { success: false, error: e.message || 'Network error' }
   }
 }
 
@@ -601,7 +594,11 @@ export async function publishPost(queueId: string): Promise<boolean> {
   }
 
   const site = appStore.sites.find(s => s.id === post.siteId)
-  if (!site) { showToast('error', 'No site found', 'The target WordPress site was not found.'); return false }
+  if (!post.siteId || post.siteId.trim() === '') {
+    showToast('error', 'No Site Assigned', 'This post has no WordPress site assigned. Edit the post in the Queue and assign a site before publishing.')
+    return false
+  }
+  if (!site) { showToast('error', 'Site Not Found', 'The target WordPress site was not found. It may have been removed from Settings.'); return false }
 
   updateQueueItem(queueId, { status: 'scheduled' })
 
@@ -625,11 +622,39 @@ export async function publishPost(queueId: string): Promise<boolean> {
       }
     } catch (e) { console.warn('Duplication check failed:', e) }
 
+    // 0. Prepare Schema for fallback meta
+    const schemasArray: any[] = []
+    
+    // If the AI generated schemas, we use ALL of them directly exactly as they appear in the preview result.
+    if (post.schemas && Array.isArray(post.schemas) && post.schemas.length > 0) {
+      post.schemas.forEach(schema => {
+        const type = schema['@type'] || 'Article'
+        const rmType = getRmSnippetType(type)
+        const finalObj = {
+          ...schema,
+          metadata: { title: type, type: 'custom', shortcode: rmType }
+        }
+        schemasArray.push(finalObj)
+      })
+    } else if (post.selectedSchemas && post.selectedSchemas.length > 0) {
+      // Fallback: if no schemas were generated, create empty ones based on UI selection
+      post.selectedSchemas.forEach(type => {
+        const rmType = getRmSnippetType(type)
+        schemasArray.push({
+          '@type': type,
+          metadata: { title: type, type: 'custom', shortcode: rmType }
+        })
+      })
+    }
+
     // 1. Process Content: Auto-sync Focus Keyword to Image Alt Text
-    let processedContent = post.content
+    let processedContent = (post.content || '')
+      .replace(/\u0000/g, '')
+      .trim()
+
     if (post.focusKeyword) {
       // Simple regex to add/sync alt text in images within the content
-      processedContent = post.content.replace(/<img([^>]+)alt=["']([^"']*)["']([^>]*)\/?>/gi, (match, p1, p2, p3) => {
+      processedContent = processedContent.replace(/<img([^>]+)alt=["']([^"']*)["']([^>]*)\/?>/gi, (match, p1, p2, p3) => {
         if (!p2.trim()) {
           return `<img${p1}alt="${post.focusKeyword}"${p3}>`
         }
@@ -684,27 +709,24 @@ export async function publishPost(queueId: string): Promise<boolean> {
     let finalFeaturedUrl = post.featuredImageUrl
 
     if (!finalFeaturedUrl) {
-      const firstImgMatch = post.content.match(/<img[^>]+src="([^">]+)"/i)
+      const firstImgMatch = post.content.match(/<img[^>]+src=["']([^"']+)["']/i)
       if (firstImgMatch) {
         finalFeaturedUrl = firstImgMatch[1]
-        console.log('Detected first image from content for featured:', finalFeaturedUrl)
+        console.log(`[AutoFeatured] Detected first content image: ${finalFeaturedUrl}`)
       }
     }
 
     if (finalFeaturedUrl) {
       try {
-        // First, check if RankMath can find the ID by URL
-        const rmImgRes = await fetch(`${baseUrl}${RANK_MATH_ENDPOINTS.getFeaturedImageId}?url=${encodeURIComponent(finalFeaturedUrl)}`, {
-          headers: { Authorization: `Basic ${creds}` }
-        })
-        if (rmImgRes.ok) {
-          const data = await rmImgRes.json()
-          if (data.id) featuredMediaId = data.id
+        console.log(`[FeaturedImage] Resolving ID for: ${finalFeaturedUrl}`)
+        const resolvedId = await resolveWPImageId(baseUrl, creds, finalFeaturedUrl)
+        if (resolvedId) {
+          featuredMediaId = resolvedId
+          console.log(`[FeaturedImage] Resolved from WP media library, ID: ${featuredMediaId}`)
         }
 
-        // If not found in media library, download and upload it
         if (!featuredMediaId) {
-          console.log('Image not in media library, uploading:', finalFeaturedUrl)
+          console.log('[FeaturedImage] Not in library, uploading...')
           const imgBlob = await fetch(finalFeaturedUrl).then(r => r.blob())
           let filename = finalFeaturedUrl.split('/').pop() || 'featured-image'
           if (!filename.toLowerCase().endsWith('.webp')) {
@@ -723,11 +745,12 @@ export async function publishPost(queueId: string): Promise<boolean> {
           if (uploadRes.ok) {
             const media = await uploadRes.json()
             featuredMediaId = media.id
+            console.log(`[FeaturedImage] Uploaded successfully, ID: ${featuredMediaId}`)
           } else {
-            console.warn('Featured image upload failed:', await uploadRes.text())
+            console.error('[FeaturedImage] Upload failed:', await uploadRes.text())
           }
         }
-      } catch (e) { console.error('Featured image processing failed', e) }
+      } catch (e) { console.error('[FeaturedImage] Process failed:', e) }
     }
 
     // 5. Prepare Schema Payload
@@ -737,43 +760,65 @@ export async function publishPost(queueId: string): Promise<boolean> {
     // Determine which schemas to include
     const activeSchemaIds = post.selectedSchemas?.map(s => s.toLowerCase()) || []
     
-    if (siteData?.globalSchemas) {
-      Object.entries(siteData.globalSchemas).forEach(([key, s]) => {
-        const typeId = key.toLowerCase()
-        if (activeSchemaIds.length > 0 && !activeSchemaIds.includes(typeId)) return
-        
+    // Use schemasArray which already merged the AI-generated schemas (post.schemas)
+    // with the basic schemaObj.
+    schemasArray.forEach(schema => {
+      const typeLabel = schema['@type'] || 'Article'
+      const typeId = typeLabel.toLowerCase()
+      
+      // Clone the AI-generated or default schema
+      const finalObj: any = { ...schema }
+      
+      // Inject standard fallbacks if missing
+      if (!finalObj.name) finalObj.name = post.title
+      if (!finalObj.headline) finalObj.headline = post.title
+      if (!finalObj.description) finalObj.description = post.excerpt || ''
+      
+      // Inject global site data if available
+      if (siteData?.globalSchemas && siteData.globalSchemas[typeLabel]) {
         try {
+          const s = siteData.globalSchemas[typeLabel]
           const parsed = typeof s === 'string' ? JSON.parse(s) : s
-          const type = parsed['@type'] || 'Article'
-          
           let content = JSON.stringify(parsed)
           content = content.replace(/\{\{title\}\}/g, post.title)
           content = content.replace(/\{\{excerpt\}\}/g, post.excerpt || '')
           content = content.replace(/\{\{authorName\}\}/g, post.authorName || 'Admin')
-          
-          const finalObj = JSON.parse(content)
-          delete finalObj['@context']
-          
-          if (type.toLowerCase() === 'faqpage') {
-            const faqs = extractFAQs(post.content)
-            if (faqs.length > 0) {
-              finalObj.mainEntity = faqs.map(f => ({
-                "@type": "Question",
-                "name": f.question,
-                "acceptedAnswer": { "@type": "Answer", "text": f.answer }
-              }))
-            }
+          const globalParsed = JSON.parse(content)
+          delete globalParsed['@context']
+          Object.assign(finalObj, globalParsed)
+        } catch (e) { console.error('Global schema merge failed', e) }
+      } else {
+        // Apply sensible defaults based on schema type
+        if (typeId === 'article' || typeId === 'newsarticle' || typeId === 'blogposting') {
+          if (!finalObj.author) finalObj.author = { '@type': 'Person', name: post.authorName || 'Admin' }
+          if (!finalObj.publisher) finalObj.publisher = { '@type': 'Organization', name: siteData?.name || 'Website' }
+        }
+        if (typeId === 'breadcrumblist') {
+          if (!finalObj.itemListElement) {
+            finalObj.itemListElement = [
+              { '@type': 'ListItem', position: 1, name: 'Home', item: siteData?.url || '/' },
+              { '@type': 'ListItem', position: 2, name: post.title },
+            ]
           }
-          finalSchemaPayload.push(finalObj)
-        } catch (e) { console.error('Schema prep failed', e) }
-      })
-    } else {
-      // If no global schemas, generate defaults for selected types
-      activeSchemaIds.forEach(typeId => {
-        // ... default schema generation could go here if needed
-        // For now, we rely on the site having globalSchemas or being empty
-      })
-    }
+        }
+      }
+
+      // Always dynamically extract FAQs to ensure the schema matches the actual content
+      // Even if the AI generated some FAQs, the extraction ensures exact match with the post text.
+      if (typeId === 'faqpage') {
+        const faqs = extractFAQs(post.content)
+        // Only override if extraction found FAQs, else rely on AI generated ones
+        if (faqs.length > 0) {
+          finalObj.mainEntity = faqs.map(f => ({
+            '@type': 'Question',
+            name: f.question,
+            acceptedAnswer: { '@type': 'Answer', text: f.answer }
+          }))
+        }
+      }
+
+      finalSchemaPayload.push(finalObj)
+    })
 
     const schemasObject: Record<string, any> = {}
     finalSchemaPayload.forEach((s) => {
@@ -790,13 +835,20 @@ export async function publishPost(queueId: string): Promise<boolean> {
       content: processedContent,
       excerpt: post.excerpt,
       status: post.wpStatus || 'publish',
-      featured_media: featuredMediaId || 0,
       meta: {
-        rank_math_title: post.title,
-        rank_math_description: post.excerpt,
-        rank_math_focus_keyword: post.focusKeyword || '',
+        rank_math_title:          post.title,
+        _rank_math_title:         post.title,
+        rank_math_description:    post.excerpt,
+        _rank_math_description:   post.excerpt,
+        rank_math_focus_keyword:  post.focusKeyword || '',
+        _rank_math_focus_keyword: post.focusKeyword || '',
+        rank_math_rich_snippet:   finalSchemaPayload.length > 0
+          ? getRmSnippetType(finalSchemaPayload[0]?.['@type'])
+          : getRmSnippetType(post.selectedSchemas?.[0]),
       }
     }
+    // Only set featured_media when we have a valid ID — sending 0 clears it
+    if (featuredMediaId) payload.featured_media = featuredMediaId
 
     if (categoryIds.length > 0) payload.categories = categoryIds
     if (tagIds.length > 0) payload.tags = tagIds
@@ -818,93 +870,25 @@ export async function publishPost(queueId: string): Promise<boolean> {
     if (res.ok) {
       const wpPost = await res.json()
       
-      // Wait 2 seconds for WordPress to fully process the post before triggering RankMath
-      await new Promise(resolve => setTimeout(resolve, 3000))
-
-      // ── RankMath REST API Sync ────────────────────────────────────────────
+      // ── RankMath REST API Sync ─────────────────────────────────────────────
       try {
-        console.log(`[RankMath] Initiating sync for Post ${wpPost.id}...`)
-        
-        // 1. updateMeta — SEO Title, Description, Focus Keyword
-        const primarySchema = getRmSnippetType(post.selectedSchemas?.[0])
-        await fetch(`${baseUrl}${RANK_MATH_ENDPOINTS.updateMeta}`, {
-          method: 'POST',
-          headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            objectID: wpPost.id,
-            objectType: 'post',
-            meta: {
-              rank_math_title: post.title,
-              _rank_math_title: post.title,
-              rank_math_description: post.excerpt,
-              _rank_math_description: post.excerpt,
-              rank_math_focus_keyword: post.focusKeyword || '',
-              _rank_math_focus_keyword: post.focusKeyword || '',
-              rank_math_rich_snippet: primarySchema,
-              _rank_math_rich_snippet: primarySchema
-            }
-          })
+        await syncAllRankMath({
+          baseUrl,
+          creds,
+          wpPostId:     wpPost.id,
+          postSlug:     post.slug || '',
+          postUrl:      wpPost.link || '',
+          title:        post.title,
+          description:  post.excerpt || '',
+          focusKeyword: post.focusKeyword || '',
+          schemas:      finalSchemaPayload,
+          featuredMediaId,
+          featuredUrl:  finalFeaturedUrl,
         })
-
-        // 2. updateSchemas — Advanced Schema Markup
-        if (finalSchemaPayload.length > 0) {
-          const schemasMap: Record<string, any> = {}
-          const schemasArray: any[] = []
-          
-          finalSchemaPayload.forEach((s) => {
-            const type = s['@type'] || 'Schema'
-            const rmType = getRmSnippetType(type)
-            const id = rmType
-            const schemaObj = {
-              ...s,
-              metadata: {
-                title: type,
-                type: 'custom',
-                shortcode: rmType
-              }
-            }
-            schemasMap[id] = schemaObj
-            schemasArray.push(schemaObj)
-          })
-
-          console.log(`[RankMath] Syncing ${finalSchemaPayload.length} schemas for Post ${wpPost.id}...`)
-          
-          await fetch(`${baseUrl}${RANK_MATH_ENDPOINTS.updateSchemas}`, {
-            method: 'POST',
-            headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              objectID: wpPost.id,
-              post_id: wpPost.id,
-              objectType: 'post',
-              schemas: schemasMap,
-              schema: schemasArray
-            })
-          })
-        }
-
-        // 3. updateRedirection
-        await fetch(`${baseUrl}${RANK_MATH_ENDPOINTS.updateRedirection}`, {
-          method: 'POST',
-          headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            objectID: wpPost.id,
-            objectType: 'post',
-            url: wpPost.link,
-            redirectionType: '301',
-            destination: wpPost.link
-          })
-        })
-
-        // 4. Verification & Cache Refresh
-        await fetch(`${baseUrl}${RANK_MATH_ENDPOINTS.getHead}?objectID=${wpPost.id}&objectType=post`, {
-          headers: { Authorization: `Basic ${creds}` }
-        })
-        
-        console.log(`[RankMath] Successfully synchronized Post ID ${wpPost.id}`)
       } catch (rmErr) {
-        console.warn('RankMath sync partially failed (non-critical):', rmErr)
+        console.warn('[RankMath] Sync partially failed (non-critical):', rmErr)
       }
-      // ─────────────────────────────────────────────────────────────────────
+      // ────────────────────────────────────────────────────────────────────────
 
       const finalStatus = post.scheduledAt ? 'scheduled' : 'published'
       const toastTitle = post.scheduledAt ? 'Post Scheduled!' : 'Post Published!'
@@ -936,17 +920,15 @@ export async function syncPostSchema(siteId: string, wpPostId: number, schema: a
   const site = appStore.sites.find(s => s.id === siteId)
   if (!site) return false
   try {
-    const creds = btoa(unescape(encodeURIComponent(`${site.username}:${site.appPassword}`)))
+    const creds   = btoa(unescape(encodeURIComponent(`${site.username}:${site.appPassword}`)))
     const baseUrl = site.url.replace(/\/$/, '')
-    const res = await fetch(`${baseUrl}${RANK_MATH_ENDPOINTS.updateSchemas}`, {
-      method: 'POST',
-      headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        post_id: wpPostId,
-        schema: Array.isArray(schema) ? schema : [schema]
-      })
+    const schemas = Array.isArray(schema) ? schema : [schema]
+    return await syncRankMathSchemas({
+      baseUrl, creds, wpPostId,
+      postSlug: '', postUrl: '',
+      title: '', description: '', focusKeyword: '',
+      schemas,
     })
-    return res.ok
   } catch (e) {
     console.error('Failed to sync post schema:', e)
     return false
@@ -1018,27 +1000,26 @@ export async function updateWordPressPost(queueId: string): Promise<boolean> {
 
     // 4. Handle Featured Image (Auto-detect first image if missing)
     if (!finalFeaturedUrl) {
-      const firstImgMatch = post.content.match(/<img[^>]+src="([^">]+)"/i)
+      const firstImgMatch = post.content.match(/<img[^>]+src=["']([^"']+)["']/i)
       if (firstImgMatch) {
         finalFeaturedUrl = firstImgMatch[1]
-        console.log('Detected first image from content:', finalFeaturedUrl)
+        console.log(`[AutoFeatured] Detected first content image for update: ${finalFeaturedUrl}`)
       }
     }
 
     if (finalFeaturedUrl) {
       try {
-        const rmImgRes = await fetch(`${baseUrl}${RANK_MATH_ENDPOINTS.getFeaturedImageId}?url=${encodeURIComponent(finalFeaturedUrl)}`, {
-          headers: { Authorization: `Basic ${creds}` }
-        })
-        if (rmImgRes.ok) {
-          const data = await rmImgRes.json()
-          if (data.id) featuredMediaId = data.id
+        console.log(`[FeaturedImage] Resolving ID for Update: ${finalFeaturedUrl}`)
+        const resolvedId = await resolveWPImageId(baseUrl, creds, finalFeaturedUrl)
+        if (resolvedId) {
+          featuredMediaId = resolvedId
+          console.log(`[FeaturedImage] Resolved from WP media library (update), ID: ${featuredMediaId}`)
         }
 
         // Fallback upload if ID not resolved
         if (!featuredMediaId && finalFeaturedUrl) {
           try {
-            console.log('Image not resolved by RankMath, uploading:', finalFeaturedUrl)
+            console.log('[FeaturedImage] Not resolved, uploading for update...')
             const imgBlob = await fetch(finalFeaturedUrl).then(r => r.blob())
             let filename = finalFeaturedUrl.split('/').pop() || 'updated-image'
             if (!filename.toLowerCase().endsWith('.webp')) {
@@ -1057,10 +1038,11 @@ export async function updateWordPressPost(queueId: string): Promise<boolean> {
             if (uploadRes.ok) {
               const media = await uploadRes.json()
               featuredMediaId = media.id
+              console.log(`[FeaturedImage] Uploaded for update, ID: ${featuredMediaId}`)
             }
-          } catch (upErr) { console.warn('Update image upload fallback failed', upErr) }
+          } catch (upErr) { console.warn('[FeaturedImage] Upload fallback failed', upErr) }
         }
-      } catch (e) { console.error('Featured image resolution failed', e) }
+      } catch (e) { console.error('[FeaturedImage] Resolution failed', e) }
     }
 
     const siteData = appStore.sites.find(s => s.id === post.siteId)
@@ -1095,6 +1077,42 @@ export async function updateWordPressPost(queueId: string): Promise<boolean> {
           finalSchemaPayload.push(finalObj)
         } catch (e) { console.error('Schema prep failed', e) }
       })
+    } else {
+      // No globalSchemas configured — build defaults for each selected schema type
+      activeSchemaIds.forEach(typeId => {
+        const typeLabel = typeId === 'faqpage' ? 'FAQPage'
+          : typeId === 'breadcrumblist' ? 'BreadcrumbList'
+          : typeId === 'imageobject'    ? 'ImageObject'
+          : typeId === 'howto'          ? 'HowTo'
+          : typeId === 'webpage'        ? 'WebPage'
+          : typeId === 'website'        ? 'WebSite'
+          : typeId === 'newsarticle'    ? 'NewsArticle'
+          : typeId.charAt(0).toUpperCase() + typeId.slice(1)
+
+        const defaultObj: any = {
+          '@type':     typeLabel,
+          name:        post.title,
+          headline:    post.title,
+          description: post.excerpt || '',
+        }
+        if (typeId === 'article' || typeId === 'newsarticle' || typeId === 'blogposting') {
+          defaultObj.author    = { '@type': 'Person', name: post.authorName || 'Admin' }
+          defaultObj.publisher = { '@type': 'Organization', name: siteData?.name || 'Website' }
+        }
+        if (typeId === 'faqpage') {
+          const faqs = extractFAQs(post.content)
+          defaultObj.mainEntity = faqs.length > 0
+            ? faqs.map(f => ({ '@type': 'Question', name: f.question, acceptedAnswer: { '@type': 'Answer', text: f.answer } }))
+            : []
+        }
+        if (typeId === 'breadcrumblist') {
+          defaultObj.itemListElement = [
+            { '@type': 'ListItem', position: 1, name: 'Home', item: siteData?.url || '/' },
+            { '@type': 'ListItem', position: 2, name: post.title },
+          ]
+        }
+        finalSchemaPayload.push(defaultObj)
+      })
     }
 
     const schemasObject: Record<string, any> = {}
@@ -1112,13 +1130,20 @@ export async function updateWordPressPost(queueId: string): Promise<boolean> {
       content: post.content,
       excerpt: post.excerpt,
       status: post.wpStatus || 'publish',
-      featured_media: featuredMediaId || 0,
       meta: {
-        rank_math_title: post.title,
-        rank_math_description: post.excerpt,
-        rank_math_focus_keyword: post.focusKeyword || '',
+        rank_math_title:          post.title,
+        _rank_math_title:         post.title,
+        rank_math_description:    post.excerpt,
+        _rank_math_description:   post.excerpt,
+        rank_math_focus_keyword:  post.focusKeyword || '',
+        _rank_math_focus_keyword: post.focusKeyword || '',
+        rank_math_rich_snippet:   finalSchemaPayload.length > 0
+          ? getRmSnippetType(finalSchemaPayload[0]?.['@type'])
+          : getRmSnippetType(post.selectedSchemas?.[0]),
       }
     }
+    // Only set featured_media when we have a valid ID — sending 0 clears it
+    if (featuredMediaId) payload.featured_media = featuredMediaId
 
     if (categoryIds.length > 0) payload.categories = categoryIds
     if (tagIds.length > 0) payload.tags = tagIds
@@ -1139,87 +1164,24 @@ export async function updateWordPressPost(queueId: string): Promise<boolean> {
 
     if (res.ok) {
 
-      // Wait 2 seconds for WordPress to fully process the post before triggering RankMath
-      await new Promise(resolve => setTimeout(resolve, 3000))
-
-      // ── RankMath REST API Sync ────────────────────────────────────────────
-      // ── RankMath REST API Sync ────────────────────────────────────────────
+      // ── RankMath REST API Sync ─────────────────────────────────────────────
       try {
-        console.log(`[RankMath] Initiating sync for Updated Post ${post.wpPostId}...`)
-        
-        // 1. updateMeta
-        const primarySchema = getRmSnippetType(post.selectedSchemas?.[0])
-        await fetch(`${baseUrl}${RANK_MATH_ENDPOINTS.updateMeta}`, {
-          method: 'POST',
-          headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            objectID: post.wpPostId,
-            objectType: 'post',
-            meta: {
-              rank_math_title: post.title,
-              _rank_math_title: post.title,
-              rank_math_description: post.excerpt,
-              _rank_math_description: post.excerpt,
-              rank_math_focus_keyword: post.focusKeyword || '',
-              _rank_math_focus_keyword: post.focusKeyword || '',
-              rank_math_rich_snippet: primarySchema,
-              _rank_math_rich_snippet: primarySchema
-            }
-          })
+        await syncAllRankMath({
+          baseUrl,
+          creds,
+          wpPostId:     post.wpPostId,
+          postSlug:     post.slug || '',
+          postUrl:      `${baseUrl}/${post.slug || ''}`,
+          title:        post.title,
+          description:  post.excerpt || '',
+          focusKeyword: post.focusKeyword || '',
+          schemas:      finalSchemaPayload,
+          featuredMediaId,
+          featuredUrl:  finalFeaturedUrl,
         })
-
-        // 2. updateSchemas
-        if (finalSchemaPayload.length > 0) {
-          const syncSchemas: Record<string, any> = {}
-          const syncSchemasArray: any[] = []
-          
-          finalSchemaPayload.forEach((s) => {
-            const type = s['@type'] || 'Schema'
-            const rmType = getRmSnippetType(type)
-            const id = rmType
-            const schemaObj = {
-              ...s,
-              metadata: {
-                title: type,
-                type: 'custom',
-                shortcode: rmType
-              }
-            }
-            syncSchemas[id] = schemaObj
-            syncSchemasArray.push(schemaObj)
-          })
-
-          await fetch(`${baseUrl}${RANK_MATH_ENDPOINTS.updateSchemas}`, {
-            method: 'POST',
-            headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              objectID: post.wpPostId,
-              post_id: post.wpPostId,
-              objectType: 'post',
-              schemas: syncSchemas,
-              schema: syncSchemasArray
-            })
-          })
-        }
-
-        // 3. updateRedirection
-        await fetch(`${baseUrl}${RANK_MATH_ENDPOINTS.updateRedirection}`, {
-          method: 'POST',
-          headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            objectID: post.wpPostId,
-            objectType: 'post',
-            url: `${baseUrl}/${post.slug || ''}`,
-            redirectionType: '301',
-            destination: `${baseUrl}/${post.slug || ''}`
-          })
-        })
-        
-        // 4. Cache Refresh
-        await fetch(`${baseUrl}${RANK_MATH_ENDPOINTS.getHead}?objectID=${post.wpPostId}&objectType=post`, {
-          headers: { Authorization: `Basic ${creds}` }
-        })
-      } catch (e) { console.error('RankMath Sync Failed (Update)', e) }
+      } catch (e) {
+        console.error('[RankMath] Sync Failed (Update):', e)
+      }
 
       showToast('success', 'Post Updated!', `"${post.title}" has been updated on ${site?.name}.`)
       return true
@@ -1265,9 +1227,23 @@ Focus Keyword: "${focusKeyword}"
 Core optimization targets: AI overview, chatgpt, gemini, claude, perplexity, co-pilot, AI mode, and LSI keyword friendly structures to ensure the content is easily extractable by generative engines.
 ${kwStr}${audienceStr}${authorStr}${affiliateStr}${customStr}
 
+WORD COUNT — NON-NEGOTIABLE:
+- The bodyContent MUST contain a minimum of ${Math.max(opts.wordCount, 1500)} words of actual readable text (not counting HTML tags).
+- Every section must be fully written out — do NOT summarize or skip. Prioritise depth over breadth.
+- A bodyContent under 1,500 words is a FAILED response.
+
+HUMANIZATION — WRITE LIKE A REAL EXPERT HUMAN:
+- Mix sentence lengths: short punchy sentences (6-10 words) + medium ones (15-25 words) + occasional long nuanced ones
+- Use first-person touches occasionally: "In my experience...", "What I found was...", "Honestly...", "To be fair..."
+- Add hedging language: "might", "could", "generally", "tends to", "in most cases", "from what I've seen"
+- Use contractions freely: "it's", "you'll", "they're", "I've", "don't", "isn't", "that's"
+- Add transitional opinions: "And that matters more than you'd think.", "This is where things get interesting."
+- Vary paragraph length: some 2-sentence paragraphs, some 4-sentence, occasional 1-sentence emphasis lines
+- FORBIDDEN phrases: "It is worth noting that", "In conclusion, it is clear", "Delve into", "In the realm of", "As an AI language model"
+- FORBIDDEN: em dashes (—), emojis, robotic fact-lists with no opinion
+
 CONTENT REQUIREMENTS:
-- Generate ${opts.wordCount}+ words
-- Use natural, human tone with slight imperfection to reduce AI detection (around 10–20 percent AI feel)
+- Use natural, human tone — target under 20% AI feel on AI detectors
 - Avoid em dashes (—), emojis, special separators
 - Write in clear, structured paragraphs
 - MANDATORY: DO NOT NUMBER SECTION HEADINGS (e.g., Use "Quick Verdict Summary" instead of "9. Quick Verdict Summary").
@@ -1310,7 +1286,7 @@ CONTENT STRUCTURE:
 - Disclaimer: Include legal, risk, or responsibility statements relevant to the topic. Include both Responsible Use and General Disclaimers.
 
 OPTIMIZATION RULES:
-- Use the Focus Keyword ("${focusKeyword}") exactly 10 to 12 times throughout the entire bodyContent. This is critical for optimal keyword density and avoiding over-optimization.
+- KEYWORD DENSITY: Use the Focus Keyword ("${focusKeyword}") with a density of 1.0%-1.5% — that means approximately ${Math.round(Math.max(opts.wordCount, 1500) * 0.012)} times for a ${Math.max(opts.wordCount, 1500)}-word article. NEVER use it more than once per paragraph. Use synonyms, pronouns, and related phrases between keyword uses. Density above 2.5% is keyword stuffing and will be penalised by Google.
 - Include related terms and entities
 - Write like a real reviewer or user
 - Add pros and cons where relevant
@@ -1327,13 +1303,13 @@ OPTIONAL ADD-ONS FOR STRONGER RANKING (Include these if relevant):
 - Who should use this and who should avoid it
 - Real-world scenarios or use cases
 
-Please respond ONLY with valid JSON:
+Please respond ONLY with raw valid JSON — no markdown, no code fences, no extra text before or after:
 {
-  "metaTitle": "[Topic]: [Action/Benefit] format (max 55 chars)",
-  "metaDescription": "Action-oriented meta description (STRICTLY EXACTLY 155 characters long including spaces)",
-  "aiOverview": "The 70-100 word snippet summary (Part 1)",
-  "bodyContent": "The full article HTML starting from Part 2 to Part 25",
-  "tags": ["tag1", "tag2", "tag3"] (EXACTLY 3 tags only)
+  "metaTitle": "Focus keyword + benefit, max 55 characters",
+  "metaDescription": "Action-oriented description with focus keyword — STRICTLY EXACTLY 155 characters including spaces",
+  "aiOverview": "70-100 word AI-extractable summary snippet",
+  "bodyContent": "Complete article HTML — MINIMUM ${Math.max(opts.wordCount, 1500)} words of readable text, fully developed sections",
+  "tags": ["tag1", "tag2", "tag3"]
 }`
 }
 
@@ -1347,7 +1323,7 @@ async function callOpenAICompatible(baseUrl: string, apiKey: string, model: stri
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
-      max_tokens: 4096
+      max_tokens: 16000
     })
   })
   if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || `HTTP ${res.status}`) }
@@ -1366,7 +1342,7 @@ async function callAnthropic(apiKey: string, model: string, prompt: string, sign
     },
     body: JSON.stringify({
       model,
-      max_tokens: 4096,
+      max_tokens: 16000,
       messages: [{ role: 'user', content: prompt }]
     })
   })
@@ -1383,7 +1359,7 @@ async function callGemini(apiKey: string, model: string, prompt: string, signal?
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.7, maxOutputTokens: 4096 }
+      generationConfig: { temperature: 0.7, maxOutputTokens: 16000 }
     })
   })
   if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || `HTTP ${res.status}`) }
@@ -1427,13 +1403,24 @@ export async function generateContent(opts: {
     }
   }
 
-  // Parse JSON from response
-  const jsonMatch = rawText.match(/\{[\s\S]*\}/)
-  if (!jsonMatch) throw new Error('The AI encountered a formatting error during generation. This is typically due to temporary API instability. Please attempt the generation again.')
+  // Strip markdown code fences if the AI wrapped its response (e.g. ```json ... ```)
+  const strippedText = rawText
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim()
+
+  // Greedy match from first { to last } to capture the full JSON object
+  const firstBrace  = strippedText.indexOf('{')
+  const lastBrace   = strippedText.lastIndexOf('}')
+  const jsonString  = firstBrace !== -1 && lastBrace > firstBrace
+    ? strippedText.slice(firstBrace, lastBrace + 1)
+    : null
+
+  if (!jsonString) throw new Error('The AI encountered a formatting error during generation. This is typically due to temporary API instability. Please attempt the generation again.')
 
   let parsed: any
   try {
-    parsed = JSON.parse(jsonMatch[0])
+    parsed = JSON.parse(jsonString)
   } catch (e) {
     throw new Error('Failed to parse AI response. The generated content was malformed.')
   }
@@ -1441,12 +1428,17 @@ export async function generateContent(opts: {
   let content = ''
 
   if (parsed.aiOverview) {
-    content += `<div class="ai-overview-box" style="background: #f8f9f0; border: 1px solid #e8e9d8; border-radius: 16px; padding: 24px; margin-bottom: 32px; box-shadow: 0 2px 12px rgba(0,0,0,0.02);">
-      <div style="font-size:0.95rem; line-height:1.7; color:#334155;">${parsed.aiOverview}</div>
+    content += `<div class="ai-overview-box" style="background: #fefce8; border: 1px solid #fef08a; border-radius: 16px; padding: 24px; margin-bottom: 32px;">
+      <div style="font-size:1.05rem; line-height:1.8; color:#2c3e50;">${parsed.aiOverview}</div>
     </div>\n\n`
   }
 
-  let bodyContent = parsed.bodyContent || parsed.content || rawText
+  let bodyContent = parsed.bodyContent || parsed.content
+  if (!bodyContent) {
+    // If we have a parsed object but no content field, try to find the longest string value
+    const values = Object.values(parsed).filter(v => typeof v === 'string') as string[]
+    bodyContent = values.sort((a, b) => b.length - a.length)[0] || rawText.substring(0, 500)
+  }
   
   // Wrap Table of Contents for styling
   if (bodyContent.includes('<h2>Table of Content</h2>')) {
@@ -1469,14 +1461,15 @@ export async function generateContent(opts: {
 
 
   if (parsed.schema) {
-    content += `\n\n${parsed.schema}`
+    const schemaStr = typeof parsed.schema === 'string' ? parsed.schema : JSON.stringify(parsed.schema, null, 2)
+    content += `\n\n${schemaStr}`
   }
 
   return {
     title: parsed.metaTitle || parsed.title || 'Untitled Post',
     content,
     excerpt: parsed.metaDescription || parsed.excerpt || '',
-    tags: Array.isArray(parsed.tags) ? parsed.tags : []
+    tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 3) : []
   }
 }
 
